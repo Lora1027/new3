@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>InkHale Vapeshop — Cloud Dashboard</title>
+  <style>
+    :root{--ink:#0ea5e9;--bg:#0b1020;--card:#ffffff;--line:#e5e7eb;--muted:#6b7280}
+    *{box-sizing:border-box} body{margin:0;background:linear-gradient(135deg,#0b1020,#0e172b);font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;color:#0f172a}
+    header{max-width:1200px;margin:24px auto 0;padding:0 16px}
+    .app{max-width:1200px;margin:16px auto 40px;padding:16px}
+    h1{color:#fff;font-size:28px;margin:8px 0 14px}
+    .tabs{display:flex;gap:8px;flex-wrap:wrap}
+    .tab{background:#fff;border:1px solid var(--line);border-radius:12px;padding:10px 14px;font-weight:600;cursor:pointer}
+    .tab.active{background:#0f172a;color:#fff;border-color:#0f172a}
+    .card{background:#fff;border:1px solid var(--line);border-radius:16px;box-shadow:0 4px 20px rgba(0,0,0,.08)}
+    .p16{padding:16px} .p20{padding:20px}
+    .row{display:flex;gap:12px;flex-wrap:wrap} .col{flex:1 1 220px}
+    label{display:block;font-size:12px;color:#374151;margin-bottom:6px}
+    input,select,textarea{width:100%;padding:10px 12px;border:1px solid #d1d5db;border-radius:10px;font-size:14px}
+    textarea{min-height:70px}
+    table{width:100%;border-collapse:separate;border-spacing:0}
+    thead th{font-size:12px;color:#6b7280;text-align:left;padding:10px 12px;background:#f9fafb;border-bottom:1px solid var(--line)}
+    tbody td{padding:10px 12px;border-bottom:1px solid #f1f5f9;font-size:14px}
+    tbody tr:hover{background:#fafafa}
+    .btn{display:inline-flex;align-items:center;gap:8px;background:#0f172a;color:#fff;border:none;border-radius:10px;padding:10px 14px;font-weight:600;cursor:pointer}
+    .btn.alt{background:#fff;color:#0f172a;border:1px solid var(--line)}
+    .btn.warn{background:#ef4444}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap}
+    .right{margin-left:auto}
+    .muted{color:var(--muted)}
+    .kpi{padding:14px;border-radius:12px;background:#f9fafb;border:1px solid var(--line)} .kpi .val{font-size:20px;font-weight:800}
+    .grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+    .grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    @media (max-width:820px){.grid3{grid-template-columns:1fr}.grid2{grid-template-columns:1fr}}
+    @media print{body{background:#fff} .tabs, .toolbar, #navTitle, #authBar, #settingsBtn{display:none} header{margin:0} .app{margin:0} .card{box-shadow:none;border:none}}
+
+    /* modals */
+    .modal{position:fixed;inset:0;background:rgba(0,0,0,.5);display:none;align-items:center;justify-content:center;z-index:50}
+    .modal.active{display:flex}
+    .panel{width:min(560px,92%);background:#fff;border-radius:16px;padding:22px;border:1px solid var(--line);box-shadow:0 10px 30px rgba(0,0,0,.2)}
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script type="module">
+    import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm'
+
+    // ---------- Settings (persisted locally but used for cloud) ----------
+    const LS = {
+      settings: 'INKHALE_SUPABASE_SETTINGS_V1'
+    }
+    const monthNames=['January','February','March','April','May','June','July','August','September','October','November','December']
+    const $ = sel => document.querySelector(sel)
+
+    function getSettings(){
+      const raw = localStorage.getItem(LS.settings)
+      if(!raw) return { url:'', anon:'', brand:'InkHale Vapeshop' }
+      try{ return JSON.parse(raw) } catch{ return { url:'', anon:'', brand:'InkHale Vapeshop' } }
+    }
+    function setSettings(s){ localStorage.setItem(LS.settings, JSON.stringify(s)) }
+
+    let SUPA = null
+    function initSupabase(){
+      const s=getSettings(); if(!s.url || !s.anon){ return null }
+      SUPA = createClient(s.url, s.anon)
+      return SUPA
+    }
+
+    // ---------- Auth ----------
+    async function who(){ const { data } = await SUPA.auth.getUser(); return data?.user || null }
+
+    async function login(email, password){
+      const { data, error } = await SUPA.auth.signInWithPassword({ email, password })
+      if(error){ throw error }
+      return data
+    }
+    async function signup(email, password){
+      const { data, error } = await SUPA.auth.signUp({ email, password })
+      if(error){ throw error }
+      return data
+    }
+    async function logout(){ await SUPA.auth.signOut() }
+
+    // ---------- UI helpers ----------
+    function fmt(n){ if(n==null||n==='') return '0'; return Number(n).toLocaleString(undefined,{maximumFractionDigits:2}) }
+    function id(){ return Math.random().toString(36).slice(2,10) }
+    function filterDates(rows, from, to){
+      const f = from? new Date(from) : null
+      const t = to? new Date(to) : null
+      return rows.filter(r=>{ const d=new Date(r.date); if(f && d< f) return false; if(t && d> t) return false; return true })
+    }
+
+    // ---------- Tables
+    // transactions: id uuid, user_id uuid, date date, type text ('income'|'expense'), category text, method text, note text, amount numeric
+    // inventory: id uuid, user_id uuid, sku text, name text, category text, cost numeric, price numeric, qty int
+    // cash_balances: id uuid, user_id uuid, year int, month int, cash numeric, gcash numeric
+
+    // ---------- Income
+    async function loadIncome(){
+      const u = await who(); if(!u) return []
+      const from=$('#incFrom').value, to=$('#incTo').value
+      let q = SUPA.from('transactions').select('*').eq('user_id', u.id).eq('type','income')
+      if(from) q=q.gte('date', from); if(to) q=q.lte('date', to)
+      if($('#incMethod').value) q=q.eq('method', $('#incMethod').value)
+      if($('#incCat').value) q=q.ilike('category', `%${$('#incCat').value}%`)
+      const { data } = await q.order('date', { ascending:false })
+      return data||[]
+    }
+    async function renderIncome(){
+      const rows = await loadIncome()
+      const tb=$('#incTable tbody'); tb.innerHTML=''
+      rows.forEach(r=>{
+        const tr=document.createElement('tr')
+        tr.innerHTML=`<td>${r.date}</td><td>${r.category||''}</td><td>${r.method||''}</td><td>${r.note||''}</td><td><b>${fmt(r.amount)}</b></td>
+        <td><button class='btn alt' data-e='${r.id}'>Edit</button> <button class='btn warn' data-x='${r.id}'>Del</button></td>`
+        tb.appendChild(tr)
+      })
+      tb.querySelectorAll('button[data-e]').forEach(b=> b.onclick=async()=>{
+        const id=b.getAttribute('data-e'); const r=(await SUPA.from('transactions').select('*').eq('id',id).single()).data
+        $('#incDate').value=r.date; $('#incAmt').value=r.amount; $('#incCategory').value=r.category||''; $('#incMeth').value=r.method||'Cash'; $('#incNote').value=r.note||''; $('#incEditing').value=r.id
+      })
+      tb.querySelectorAll('button[data-x]').forEach(b=> b.onclick=async()=>{
+        if(!confirm('Delete this income?')) return; await SUPA.from('transactions').delete().eq('id', b.getAttribute('data-x')); renderIncome()
+      })
+    }
+    $('#saveIncome').addEventListener('click', async ()=>{
+      const u=await who(); if(!u) return alert('Please log in.')
+      const row={ user_id:u.id, type:'income', date: $('#incDate').value || new Date().toISOString().slice(0,10), amount:Number($('#incAmt').value||0), category:$('#incCategory').value||'Sales', method:$('#incMeth').value||'Cash', note:$('#incNote').value||'' }
+      const id=$('#incEditing').value
+      if(id){ await SUPA.from('transactions').update(row).eq('id', id) } else { await SUPA.from('transactions').insert(row) }
+      $('#incEditing').value=''; ['incDate','incAmt','incCategory','incNote'].forEach(x=> $('#'+x).value=''); $('#incMeth').value='Cash'; renderIncome()
+    })
+    $('#resetIncome').addEventListener('click',()=>{ $('#incEditing').value=''; ['incDate','incAmt','incCategory','incNote'].forEach(x=> $('#'+x).value=''); $('#incMeth').value='Cash' })
+    ;['incFrom','incTo','incMethod','incCat'].forEach(id=> $('#'+id).addEventListener('change', renderIncome))
+
+    // ---------- Expenses
+    async function loadExpenses(){
+      const u = await who(); if(!u) return []
+      const from=$('#expFrom').value, to=$('#expTo').value
+      let q = SUPA.from('transactions').select('*').eq('user_id', u.id).eq('type','expense')
+      if(from) q=q.gte('date', from); if(to) q=q.lte('date', to)
+      if($('#expMethod').value) q=q.eq('method', $('#expMethod').value)
+      if($('#expCat').value) q=q.ilike('category', `%${$('#expCat').value}%`)
+      const { data } = await q.order('date', { ascending:false })
+      return data||[]
+    }
+    async function renderExpenses(){
+      const rows = await loadExpenses()
+      const tb=$('#expTable tbody'); tb.innerHTML=''
+      rows.forEach(r=>{
+        const tr=document.createElement('tr')
+        tr.innerHTML=`<td>${r.date}</td><td>${r.category||''}</td><td>${r.method||''}</td><td>${r.note||''}</td><td><b>${fmt(r.amount)}</b></td>
+        <td><button class='btn alt' data-e='${r.id}'>Edit</button> <button class='btn warn' data-x='${r.id}'>Del</button></td>`
+        tb.appendChild(tr)
+      })
+      tb.querySelectorAll('button[data-e]').forEach(b=> b.onclick=async()=>{
+        const id=b.getAttribute('data-e'); const r=(await SUPA.from('transactions').select('*').eq('id',id).single()).data
+        $('#expDate').value=r.date; $('#expAmt').value=r.amount; $('#expCategory').value=r.category||''; $('#expMeth').value=r.method||'Cash'; $('#expNote').value=r.note||''; $('#expEditing').value=r.id
+      })
+      tb.querySelectorAll('button[data-x]').forEach(b=> b.onclick=async()=>{
+        if(!confirm('Delete this expense?')) return; await SUPA.from('transactions').delete().eq('id', b.getAttribute('data-x')); renderExpenses()
+      })
+    }
+    $('#saveExpense').addEventListener('click', async ()=>{
+      const u=await who(); if(!u) return alert('Please log in.')
+      const row={ user_id:u.id, type:'expense', date: $('#expDate').value || new Date().toISOString().slice(0,10), amount:Number($('#expAmt').value||0), category:$('#expCategory').value||'Expense', method:$('#expMeth').value||'Cash', note:$('#expNote').value||'' }
+      const id=$('#expEditing').value
+      if(id){ await SUPA.from('transactions').update(row).eq('id', id) } else { await SUPA.from('transactions').insert(row) }
+      $('#expEditing').value=''; ['expDate','expAmt','expCategory','expNote'].forEach(x=> $('#'+x).value=''); $('#expMeth').value='Cash'; renderExpenses()
+    })
+    $('#resetExpense').addEventListener('click',()=>{ $('#expEditing').value=''; ['expDate','expAmt','expCategory','expNote'].forEach(x=> $('#'+x).value=''); $('#expMeth').value='Cash' })
+    ;['expFrom','expTo','expMethod','expCat'].forEach(id=> $('#'+id).addEventListener('change', renderExpenses))
+
+    // ---------- Inventory
+    async function renderInventory(){
+      const u=await who(); if(!u) return
+      const q=($('#invSearch').value||'').toLowerCase()
+      let { data } = await SUPA.from('inventory').select('*').eq('user_id', u.id).order('created_at', { ascending:false })
+      data = (data||[]).filter(r=> (r.sku||'').toLowerCase().includes(q)||(r.name||'').toLowerCase().includes(q)||(r.category||'').toLowerCase().includes(q))
+      const tb=$('#invTable tbody'); tb.innerHTML=''
+      data.forEach(r=>{
+        const tr=document.createElement('tr')
+        tr.innerHTML=`<td>${r.sku}</td><td>${r.name}</td><td>${r.category||''}</td><td>${fmt(r.cost)}</td><td>${fmt(r.price)}</td><td>${r.qty||0}</td>
+        <td><button class='btn alt' data-e='${r.id}'>Edit</button> <button class='btn warn' data-x='${r.id}'>Del</button></td>`
+        tb.appendChild(tr)
+      })
+      tb.querySelectorAll('button[data-e]').forEach(b=> b.onclick=async()=>{
+        const id=b.getAttribute('data-e'); const r=(await SUPA.from('inventory').select('*').eq('id',id).single()).data
+        $('#sku').value=r.sku; $('#name').value=r.name; $('#cat').value=r.category||''; $('#cost').value=r.cost||''; $('#price').value=r.price||''; $('#qty').value=r.qty||0; $('#invEditing').value=r.id
+      })
+      tb.querySelectorAll('button[data-x]').forEach(b=> b.onclick=async()=>{ if(!confirm('Delete item?')) return; await SUPA.from('inventory').delete().eq('id', b.getAttribute('data-x')); renderInventory() })
+    }
+    $('#invSave').addEventListener('click', async ()=>{
+      const u=await who(); if(!u) return alert('Please log in.')
+      const row={ user_id:u.id, sku:$('#sku').value.trim(), name:$('#name').value.trim(), category:$('#cat').value.trim(), cost:Number($('#cost').value||0), price:Number($('#price').value||0), qty:Number($('#qty').value||0) }
+      if(!row.sku||!row.name){ alert('SKU and Name are required'); return }
+      const id=$('#invEditing').value
+      if(id){ await SUPA.from('inventory').update(row).eq('id', id) } else { await SUPA.from('inventory').insert(row) }
+      $('#invEditing').value=''; ['sku','name','cat','cost','price','qty'].forEach(i=> $('#'+i).value=''); renderInventory()
+    })
+    $('#invClear').addEventListener('click',()=>{ $('#invEditing').value=''; ['sku','name','cat','cost','price','qty'].forEach(i=> $('#'+i).value='') })
+    $('#invSearch').addEventListener('input', renderInventory)
+    $('#csv').addEventListener('change', async e=>{
+      const u=await who(); if(!u) return alert('Please log in.')
+      const f=e.target.files[0]; if(!f) return
+      Papa.parse(f,{header:true,skipEmptyLines:true,complete: async (res)=>{
+        const rows=(res.data||[]).filter(r=> r.sku && r.name).map(r=>({ user_id:u.id, id:crypto.randomUUID(), sku:String(r.sku).trim(), name:String(r.name).trim(), category:(r.category||'').trim(), cost:Number(r.cost||0), price:Number(r.price||0), qty:Number(r.qty||0) }))
+        if(rows.length){ await SUPA.from('inventory').insert(rows) }
+        renderInventory(); alert('Bulk items added: '+rows.length)
+      }})
+    })
+
+    // ---------- Comparison (monthly profit + cash/gcash)
+    function monthKey(y,m){ return `${y}-${String(m).padStart(2,'0')}` }
+    async function saveCash(){
+      const u=await who(); if(!u) return alert('Please log in.')
+      const y=Number($('#cbYear').value)||new Date().getFullYear(); const m=Number($('#cbMonth').value); const cash=Number($('#cbCash').value||0); const gcash=Number($('#cbGcash').value||0)
+      const { data } = await SUPA.from('cash_balances').select('id').eq('user_id',u.id).eq('year',y).eq('month',m).maybeSingle()
+      if(data?.id){ await SUPA.from('cash_balances').update({ cash, gcash }).eq('id', data.id) }
+      else{ await SUPA.from('cash_balances').insert({ user_id:u.id, year:y, month:m, cash, gcash }) }
+      alert('Saved.')
+    }
+    $('#cbSave').addEventListener('click', saveCash)
+
+    async function totalsByMonth(year){
+      const u=await who(); if(!u) return {}
+      const inc = (await SUPA.from('transactions').select('date,amount').eq('user_id',u.id).eq('type','income').gte('date', `${year}-01-01`).lte('date', `${year}-12-31`)).data||[]
+      const exp = (await SUPA.from('transactions').select('date,amount').eq('user_id',u.id).eq('type','expense').gte('date', `${year}-01-01`).lte('date', `${year}-12-31`)).data||[]
+      const out={}
+      inc.forEach(r=>{ const m=new Date(r.date).getMonth()+1; out[m]=out[m]||{income:0,expense:0}; out[m].income+=Number(r.amount||0) })
+      exp.forEach(r=>{ const m=new Date(r.date).getMonth()+1; out[m]=out[m]||{income:0,expense:0}; out[m].expense+=Number(r.amount||0) })
+      return out
+    }
+    let chartProfit=null
+    async function runComparison(){
+      const year=Number($('#cmpYear').value)||new Date().getFullYear();
+      const map=await totalsByMonth(year)
+      const labels=[...Array(12)].map((_,i)=>monthNames[i])
+      const income=[...Array(12)].map((_,i)=> (map[i+1]?.income)||0)
+      const expense=[...Array(12)].map((_,i)=> (map[i+1]?.expense)||0)
+      const net=income.map((v,i)=> v-(expense[i]||0))
+      const u=await who(); const bal=((await SUPA.from('cash_balances').select('*').eq('user_id',u.id).eq('year',year)).data)||[]
+      const cash=[...Array(12)].map((_,i)=> bal.find(b=>b.month===i+1)?.cash || 0)
+      const gcash=[...Array(12)].map((_,i)=> bal.find(b=>b.month===i+1)?.gcash || 0)
+
+      $('#cmpIncome').textContent=fmt(income.reduce((a,b)=>a+b,0))
+      $('#cmpExpense').textContent=fmt(expense.reduce((a,b)=>a+b,0))
+      $('#cmpNet').textContent=fmt(net.reduce((a,b)=>a+b,0))
+
+      if(chartProfit) chartProfit.destroy()
+      chartProfit = new Chart($('#chartProfit'), {type:'bar', data:{labels, datasets:[
+        {label:'Net Profit', data:net}, {label:'Cash on Hand', data:cash}, {label:'GCash', data:gcash}
+      ]}, options:{plugins:{legend:{position:'bottom'}, tooltip:{callbacks:{label:(c)=> c.dataset.label+': '+fmt(c.parsed.y)}}}, scales:{y:{beginAtZero:true}}})
+    }
+    $('#cmpRun').addEventListener('click', runComparison)
+
+    // ---------- Print/Export
+    async function renderPreview(){
+      const u=await who(); if(!u) return
+      const allInc=(await SUPA.from('transactions').select('*').eq('user_id',u.id).eq('type','income')).data||[]
+      const allExp=(await SUPA.from('transactions').select('*').eq('user_id',u.id).eq('type','expense')).data||[]
+      const thead=$('#preview thead'); const tbody=$('#preview tbody')
+      thead.innerHTML='<tr><th>Type</th><th>Date</th><th>Category</th><th>Method</th><th>Note</th><th>Amount</th></tr>'
+      const rows=[...allInc.map(r=>({...r,_type:'Income'})), ...allExp.map(r=>({...r,_type:'Expense'}))].sort((a,b)=>new Date(b.date)-new Date(a.date))
+      tbody.innerHTML=''; rows.forEach(r=>{ const tr=document.createElement('tr'); tr.innerHTML=`<td>${r._type}</td><td>${r.date}</td><td>${r.category||''}</td><td>${r.method||''}</td><td>${r.note||''}</td><td>${fmt(r.amount)}</td>`; tbody.appendChild(tr) })
+    }
+    $('#btnExport').addEventListener('click', async ()=>{
+      const u=await who(); if(!u) return
+      const inc=(await SUPA.from('transactions').select('*').eq('user_id',u.id).eq('type','income')).data||[]
+      const exp=(await SUPA.from('transactions').select('*').eq('user_id',u.id).eq('type','expense')).data||[]
+      const inv=(await SUPA.from('inventory').select('*').eq('user_id',u.id)).data||[]
+      const wb=XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(inc),'Income')
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(exp),'Expenses')
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(inv),'Inventory')
+      XLSX.writeFile(wb, 'InkHale-Cloud-Data.xlsx')
+    })
+
+    // ---------- Tabs & Boot ----------
+    function bindTabs(){
+      document.querySelectorAll('.tab').forEach(btn=>btn.addEventListener('click',()=>{
+        document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active')); btn.classList.add('active')
+        const name=btn.dataset.tab; document.querySelectorAll('main section').forEach(s=>s.hidden=true); $('#tab-'+name).hidden=false
+        if(name==='income') renderIncome()
+        if(name==='expenses') renderExpenses()
+        if(name==='inventory') renderInventory()
+        if(name==='compare') runComparison()
+        if(name==='print') renderPreview()
+      }))
+    }
+
+    // ---------- Settings Modal ----------
+    function openSettings(){ $('#settings').classList.add('active'); const s=getSettings(); $('#setUrl').value=s.url; $('#setAnon').value=s.anon; $('#setBrand').value=s.brand }
+    function closeSettings(){ $('#settings').classList.remove('active') }
+    $('#settingsBtn').addEventListener('click', openSettings)
+    $('#setSave').addEventListener('click', ()=>{ setSettings({ url:$('#setUrl').value.trim(), anon:$('#setAnon').value.trim(), brand:$('#setBrand').value.trim()||'InkHale Vapeshop' }); location.reload() })
+    $('#setClose').addEventListener('click', closeSettings)
+
+    // ---------- Auth Modal ----------
+    function openAuth(){ $('#auth').classList.add('active') }
+    function closeAuth(){ $('#auth').classList.remove('active') }
+    $('#loginBtn').addEventListener('click', openAuth)
+    $('#logoutBtn').addEventListener('click', async ()=>{ await logout(); location.reload() })
+    $('#authClose').addEventListener('click', closeAuth)
+    $('#btnDoLogin').addEventListener('click', async ()=>{
+      try{ await login($('#authEmail').value.trim(), $('#authPass').value); closeAuth(); boot() }catch(e){ alert(e.message) }
+    })
+    $('#btnDoSignup').addEventListener('click', async ()=>{
+      try{ await signup($('#authEmail').value.trim(), $('#authPass').value); alert('Account created. Now log in.'); }catch(e){ alert(e.message) }
+    })
+
+    // ---------- Boot ----------
+    async function boot(){
+      const s=getSettings(); $('#brand').textContent=s.brand; $('#navTitle').textContent=s.brand+' — Cloud Dashboard'
+      if(!initSupabase()){ openSettings(); return }
+      const user = await who()
+      $('#who').textContent = user? user.email : 'Signed out'
+      if(!user){ openAuth() } else { renderIncome(); renderExpenses(); renderInventory(); }
+      bindTabs()
+      // set default month pickers
+      const mSel=$('#cbMonth'); if(mSel && !mSel.dataset.filled){ for(let i=1;i<=12;i++){ const o=document.createElement('option'); o.value=i; o.textContent=monthNames[i-1]; mSel.appendChild(o) } mSel.value=String(new Date().getMonth()+1); mSel.dataset.filled='1' }
+    }
+
+    boot()
+  </script>
+</head>
+<body>
+  <header>
+    <div class="row" id="authBar" style="align-items:center">
+      <h1 id="navTitle">InkHale Vapeshop — Cloud Dashboard</h1>
+      <div class="right toolbar">
+        <button class="btn alt" id="settingsBtn">Connect to Supabase</button>
+        <span class="muted" id="who">—</span>
+        <button class="btn" id="loginBtn">Log in</button>
+        <button class="btn alt" id="logoutBtn">Log out</button>
+      </div>
+    </div>
+    <div class="tabs">
+      <button class="tab active" data-tab="income">Income</button>
+      <button class="tab" data-tab="expenses">Expenses</button>
+      <button class="tab" data-tab="inventory">Inventory</button>
+      <button class="tab" data-tab="compare">Comparison</button>
+      <button class="tab" data-tab="print">Print / Export</button>
+    </div>
+  </header>
+
+  <main class="app">
+    <!-- INCOME -->
+    <section id="tab-income" class="card p20">
+      <div class="toolbar" style="margin-bottom:12px">
+        <div class="row" style="flex:1">
+          <div class="col"><label>From</label><input type="date" id="incFrom"></div>
+          <div class="col"><label>To</label><input type="date" id="incTo"></div>
+          <div class="col"><label>Method</label><select id="incMethod"><option value="">All</option><option>Cash</option><option>GCash</option><option>Card</option><option>Bank</option></select></div>
+          <div class="col"><label>Category</label><input id="incCat" placeholder="e.g., Sales" /></div>
+        </div>
+        <div class="right"><button class="btn" id="addIncome">Add Income</button></div>
+      </div>
+      <div class="row">
+        <input type="hidden" id="incEditing" />
+        <div class="col card p16">
+          <h2>Add / Edit</h2>
+          <div class="grid2">
+            <div class="col"><label>Date</label><input type="date" id="incDate"></div>
+            <div class="col"><label>Amount</label><input type="number" step="0.01" id="incAmt"></div>
+            <div class="col"><label>Category</label><input id="incCategory" placeholder="Sales"></div>
+            <div class="col"><label>Method</label><select id="incMeth"><option>Cash</option><option>GCash</option><option>Card</option><option>Bank</option></select></div>
+          </div>
+          <label style="margin-top:8px">Note</label>
+          <textarea id="incNote" placeholder="Optional"></textarea>
+          <div class="toolbar" style="margin-top:10px">
+            <button class="btn" id="saveIncome">Save</button>
+            <button class="btn alt" id="resetIncome">Clear</button>
+          </div>
+        </div>
+        <div class="col" style="flex:2 1 520px">
+          <div class="card p16">
+            <h2>Income List</h2>
+            <div style="overflow:auto"><table id="incTable"><thead><tr><th>Date</th><th>Category</th><th>Method</th><th>Note</th><th>Amount</th><th></th></tr></thead><tbody></tbody></table></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- EXPENSES -->
+    <section id="tab-expenses" class="card p20" hidden>
+      <div class="toolbar" style="margin-bottom:12px">
+        <div class="row" style="flex:1">
+          <div class="col"><label>From</label><input type="date" id="expFrom"></div>
+          <div class="col"><label>To</label><input type="date" id="expTo"></div>
+          <div class="col"><label>Method</label><select id="expMethod"><option value="">All</option><option>Cash</option><option>GCash</option><option>Card</option><option>Bank</option></select></div>
+          <div class="col"><label>Category</label><input id="expCat" placeholder="e.g., Rent" /></div>
+        </div>
+        <div class="right"><button class="btn" id="addExpense">Add Expense</button></div>
+      </div>
+      <div class="row">
+        <input type="hidden" id="expEditing" />
+        <div class="col card p16">
+          <h2>Add / Edit</h2>
+          <div class="grid2">
+            <div class="col"><label>Date</label><input type="date" id="expDate"></div>
+            <div class="col"><label>Amount</label><input type="number" step="0.01" id="expAmt"></div>
+            <div class="col"><label>Category</label><input id="expCategory" placeholder="Expense"></div>
+            <div class="col"><label>Method</label><select id="expMeth"><option>Cash</option><option>GCash</option><option>Card</option><option>Bank</option></select></div>
+          </div>
+          <label style="margin-top:8px">Note</label>
+          <textarea id="expNote" placeholder="Optional"></textarea>
+          <div class="toolbar" style="margin-top:10px">
+            <button class="btn" id="saveExpense">Save</button>
+            <button class="btn alt" id="resetExpense">Clear</button>
+          </div>
+        </div>
+        <div class="col" style="flex:2 1 520px">
+          <div class="card p16">
+            <h2>Expense List</h2>
+            <div style="overflow:auto"><table id="expTable"><thead><tr><th>Date</th><th>Category</th><th>Method</th><th>Note</th><th>Amount</th><th></th></tr></thead><tbody></tbody></table></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- INVENTORY -->
+    <section id="tab-inventory" class="card p20" hidden>
+      <div class="toolbar" style="margin-bottom:10px">
+        <div class="row" style="flex:1">
+          <div class="col"><label>Search</label><input id="invSearch" placeholder="SKU / Name / Category"></div>
+        </div>
+        <div class="right"><button class="btn" id="invAdd">Add Item</button></div>
+      </div>
+      <div class="row">
+        <input type="hidden" id="invEditing" />
+        <div class="col card p16">
+          <h2>Add / Edit Item</h2>
+          <div class="grid2">
+            <div class="col"><label>SKU</label><input id="sku"></div>
+            <div class="col"><label>Name</label><input id="name"></div>
+            <div class="col"><label>Category</label><input id="cat"></div>
+            <div class="col"><label>Cost</label><input type="number" step="0.01" id="cost"></div>
+            <div class="col"><label>Price</label><input type="number" step="0.01" id="price"></div>
+            <div class="col"><label>Qty</label><input type="number" step="1" id="qty"></div>
+          </div>
+          <div class="toolbar" style="margin-top:10px">
+            <button class="btn" id="invSave">Save Item</button>
+            <button class="btn alt" id="invClear">Clear</button>
+          </div>
+          <h3>Bulk CSV Upload</h3>
+          <div class="row">
+            <div class="col"><input type="file" id="csv" accept=".csv"></div>
+            <div class="col muted">Columns: <code>sku,name,category,cost,price,qty</code></div>
+          </div>
+        </div>
+        <div class="col" style="flex:2 1 520px">
+          <div class="card p16">
+            <h2>Inventory</h2>
+            <div style="overflow:auto"><table id="invTable"><thead><tr><th>SKU</th><th>Name</th><th>Category</th><th>Cost</th><th>Price</th><th>Qty</th><th></th></tr></thead><tbody></tbody></table></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- COMPARISON -->
+    <section id="tab-compare" class="card p20" hidden>
+      <div class="row">
+        <div class="col card p16">
+          <h2>Cash Balances per Month</h2>
+          <div class="grid2">
+            <div class="col"><label>Month</label><select id="cbMonth"></select></div>
+            <div class="col"><label>Year</label><input id="cbYear" type="number" value="2025"></div>
+            <div class="col"><label>Cash on Hand</label><input id="cbCash" type="number" step="0.01"></div>
+            <div class="col"><label>GCash Amount</label><input id="cbGcash" type="number" step="0.01"></div>
+          </div>
+          <div class="toolbar" style="margin-top:10px"><button class="btn" id="cbSave">Save Month Balance</button></div>
+        </div>
+        <div class="col card p16">
+          <h2>Pick Year to Compare</h2>
+          <div class="grid2"><div class="col"><label>Year</label><input id="cmpYear" type="number" value="2025"></div></div>
+          <div class="toolbar" style="margin-top:10px"><button class="btn" id="cmpRun">Run Comparison</button></div>
+        </div>
+      </div>
+      <div class="grid3" style="margin:12px 0">
+        <div class="kpi"><div class="muted">Total Income</div><div class="val" id="cmpIncome">0</div></div>
+        <div class="kpi"><div class="muted">Total Expenses</div><div class="val" id="cmpExpense">0</div></div>
+        <div class="kpi"><div class="muted">Net Profit</div><div class="val" id="cmpNet">0</div></div>
+      </div>
+      <div class="card p16" style="margin-top:8px">
+        <h2>Monthly Profit vs Cash on Hand + GCash</h2>
+        <canvas id="chartProfit" height="130"></canvas>
+      </div>
+    </section>
+
+    <!-- PRINT/EXPORT -->
+    <section id="tab-print" class="card p20" hidden>
+      <h2>Print & Export</h2>
+      <div class="toolbar" style="margin:8px 0">
+        <button class="btn" onclick="window.print()">Print</button>
+        <button class="btn alt" id="btnExport">Export All (.xlsx)</button>
+      </div>
+      <div class="card p16">
+        <h3>Quick Preview</h3>
+        <div style="overflow:auto"><table id="preview"><thead></thead><tbody></tbody></table></div>
+      </div>
+    </section>
+  </main>
+
+  <!-- Settings Modal -->
+  <div id="settings" class="modal"><div class="panel">
+    <h2 style="margin:0 0 10px">Connect to Supabase</h2>
+    <div class="row">
+      <div class="col"><label>Project URL</label><input id="setUrl" placeholder="https://xxxx.supabase.co"></div>
+      <div class="col"><label>Anon Key</label><input id="setAnon" placeholder="ey..." /></div>
+      <div class="col"><label>Brand Name</label><input id="setBrand" placeholder="InkHale Vapeshop" /></div>
+    </div>
+    <div class="toolbar" style="margin-top:12px">
+      <button class="btn" id="setSave">Save & Reload</button>
+      <button class="btn alt" id="setClose">Close</button>
+      <div class="right muted">Find these in Supabase → Project Settings → API</div>
+    </div>
+  </div></div>
+
+  <!-- Auth Modal -->
+  <div id="auth" class="modal"><div class="panel">
+    <h2 style="margin:0 0 10px">Sign in to <span id="brand">InkHale Vapeshop</span></h2>
+    <div class="row">
+      <div class="col"><label>Email</label><input id="authEmail" placeholder="you@email.com"></div>
+      <div class="col"><label>Password</label><input id="authPass" type="password" placeholder="••••••" /></div>
+    </div>
+    <div class="toolbar" style="margin-top:12px">
+      <button class="btn" id="btnDoLogin">Log in</button>
+      <button class="btn alt" id="btnDoSignup">Sign up</button>
+      <button class="btn alt" id="authClose">Close</button>
+    </div>
+  </div></div>
+
+  <!--
+    ===== Supabase SQL (paste in Supabase → SQL Editor and run) =====
+
+    create table if not exists public.transactions (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid not null references auth.users(id) on delete cascade,
+      date date not null,
+      type text not null check (type in ('income','expense')),
+      category text,
+      method text,
+      note text,
+      amount numeric not null check (amount >= 0)
+    );
+
+    create table if not exists public.inventory (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid not null references auth.users(id) on delete cascade,
+      sku text not null,
+      name text not null,
+      category text,
+      cost numeric,
+      price numeric,
+      qty integer default 0,
+      created_at timestamp with time zone default now()
+    );
+
+    create table if not exists public.cash_balances (
+      id uuid primary key default gen_random_uuid(),
+      user_id uuid not null references auth.users(id) on delete cascade,
+      year int not null,
+      month int not null check (month between 1 and 12),
+      cash numeric default 0,
+      gcash numeric default 0,
+      unique(user_id, year, month)
+    );
+
+    alter table public.transactions enable row level security;
+    alter table public.inventory enable row level security;
+    alter table public.cash_balances enable row level security;
+
+    create policy t_sel on public.transactions for select using (auth.uid() = user_id);
+    create policy t_ins on public.transactions for insert with check (auth.uid() = user_id);
+    create policy t_upd on public.transactions for update using (auth.uid() = user_id);
+    create policy t_del on public.transactions for delete using (auth.uid() = user_id);
+
+    create policy i_sel on public.inventory for select using (auth.uid() = user_id);
+    create policy i_ins on public.inventory for insert with check (auth.uid() = user_id);
+    create policy i_upd on public.inventory for update using (auth.uid() = user_id);
+    create policy i_del on public.inventory for delete using (auth.uid() = user_id);
+
+    create policy c_sel on public.cash_balances for select using (auth.uid() = user_id);
+    create policy c_ins on public.cash_balances for insert with check (auth.uid() = user_id);
+    create policy c_upd on public.cash_balances for update using (auth.uid() = user_id);
+    create policy c_del on public.cash_balances for delete using (auth.uid() = user_id);
+
+    -- Helpful indexes
+    create index if not exists tx_user_date_idx on public.transactions (user_id, date);
+    create index if not exists inv_user_sku_idx on public.inventory (user_id, sku);
+  -->
+</body>
+</html>
